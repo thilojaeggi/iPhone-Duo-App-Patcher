@@ -2,10 +2,10 @@
 
 A portable macOS command-line utility to patch iOS Simulator application bundles for Apple's dual-screen foldable device layout (iPhone Duo).
 
-Below command installs all apps from the 27.2 simruntime into the Duos'.
+Installs all stock apps into the currently booted simulator. Apps are grabbed from 27.2 where possible, but fall back to 27.0 for apps (Files, Maps, Reminders) that call 27.2 private framework APIs missing from 27.1.
 ```bash
 # Patch and install all stock apps to the booted iPhone Duo:
-./patch_duo_app.zsh --from-runtime 27.2 --device booted
+./patch_duo_app.zsh --device booted
 ```
 
 ---
