@@ -9,6 +9,8 @@ Below command installs all apps from the 27.2 simruntime into the Duos'.
 ```
 
 ---
+<img width="851" height="617" alt="image" src="https://github.com/user-attachments/assets/5706ab01-80fe-49e1-9963-3b4eb1e9861e" />
+
 
 ## Overview
 
