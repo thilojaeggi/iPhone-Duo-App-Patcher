@@ -133,7 +133,7 @@ check_dependencies() {
 # ------------------------------------------------------------------------------
 simctl_query() {
     /usr/bin/python3 -c "
-import sys, json, subprocess, re
+import sys, json, subprocess, re, os
 
 action = sys.argv[1]
 
@@ -217,6 +217,69 @@ elif action == 'resolve_device':
         sys.exit(1)
     except Exception as e:
         sys.stderr.write(f'Error resolving device: {e}\n')
+        sys.exit(1)
+
+elif action == 'resolve_apps':
+    target_sdk = sys.argv[2]
+    from_rt = sys.argv[3] if len(sys.argv) > 3 else ''
+    apps_raw = sys.argv[4:] if len(sys.argv) > 4 else []
+    try:
+        data = json.loads(subprocess.check_output(['xcrun', 'simctl', 'list', 'runtimes', '-j']))
+        runtimes = data.get('runtimes', [])
+
+        def find_rt(query):
+            if not query: return None
+            q = query.lower().strip()
+            for r in runtimes:
+                name = r.get('name', '').lower()
+                ident = r.get('identifier', '').lower()
+                if q == name or q == ident or q == name.replace('ios ', ''):
+                    root = r.get('runtimeRoot')
+                    if root and os.path.exists(root): return r
+            for r in runtimes:
+                if q in r.get('name', '').lower() or q in r.get('identifier', '').lower():
+                    root = r.get('runtimeRoot')
+                    if root and os.path.exists(root): return r
+            return None
+
+        rt_27_2 = find_rt('27.2')
+        rt_27_0 = find_rt('27.0')
+        primary = find_rt(from_rt) if from_rt else (rt_27_2 or rt_27_0)
+
+        target_list = apps_raw if apps_raw else ['Contacts.app', 'Preview.app', 'Files.app', 'Maps.app', 'MobileCal.app', 'Reminders.app', 'Shortcuts.app', 'Passwords.app', 'News.app']
+        needs_27_0_on_27_1 = {'files.app', 'maps.app', 'reminders.app', 'mobilecal.app', 'shortcuts.app', 'news.app'}
+
+        for item in target_list:
+            app_name = item if item.endswith('.app') else item + '.app'
+            chosen_path = None
+            source_note = ''
+
+            # If host simulator is iOS 27.1, route apps with 27.2-specific private symbols to 27.0 for stability
+            if target_sdk.startswith('27.1') and app_name.lower() in needs_27_0_on_27_1 and rt_27_0:
+                cand = os.path.join(rt_27_0['runtimeRoot'], 'Applications', app_name)
+                if os.path.exists(cand):
+                    chosen_path = cand
+                    source_note = 'iOS 27.0 (27.1 framework compatibility)'
+
+            if not chosen_path and primary:
+                cand = os.path.join(primary['runtimeRoot'], 'Applications', app_name)
+                if os.path.exists(cand):
+                    chosen_path = cand
+                    source_note = primary.get('name', 'runtime')
+
+            if not chosen_path and rt_27_0:
+                cand = os.path.join(rt_27_0['runtimeRoot'], 'Applications', app_name)
+                if os.path.exists(cand):
+                    chosen_path = cand
+                    source_note = 'iOS 27.0'
+
+            if chosen_path:
+                print(f'{chosen_path}\t{source_note}')
+            else:
+                sys.stderr.write(f'Warning: Could not locate bundle for {item}\n')
+        sys.exit(0)
+    except Exception as e:
+        sys.stderr.write(f'Error resolving apps: {e}\n')
         sys.exit(1)
 " "$@"
 }
@@ -470,59 +533,46 @@ main() {
         SDK_VER="27.1"
     fi
 
-    # 2. Resolve Source Runtime (if requested)
-    local runtime_apps_dir=""
+    # 2. Check if we should resolve apps from simulator runtimes
+    local use_runtime_resolution=false
     if [[ -n "$FROM_RUNTIME" ]]; then
-        log_info "Resolving simulator runtime matching '${FROM_RUNTIME}'..."
-        local rt_info
-        rt_info="$(simctl_query resolve_runtime "$FROM_RUNTIME")" || {
-            log_error "Could not locate simulator runtime matching: $FROM_RUNTIME"
-            exit 1
-        }
-        local rt_root="$(print "$rt_info" | sed -n '1p')"
-        local rt_name="$(print "$rt_info" | sed -n '2p')"
-        log_step "Resolved runtime: ${BOLD}${rt_name}${RESET}"
-        log_detail "Runtime root: $rt_root"
-
-        runtime_apps_dir="$rt_root/Applications"
-        if [[ ! -d "$runtime_apps_dir" ]]; then
-            log_error "Applications directory not found in runtime root: $runtime_apps_dir"
-            exit 1
-        fi
-
-        # If pulling from runtime and no output dir set, stage in /tmp
-        if [[ -z "$OUTPUT_DIR" ]]; then
-            OUTPUT_DIR="${TMPDIR:-/tmp}/duo_patched_apps"
-            log_step "Staging patched apps in: $OUTPUT_DIR"
-        fi
+        use_runtime_resolution=true
+    elif [[ ${#TARGET_ARGS[@]} -eq 0 ]]; then
+        use_runtime_resolution=true
+    else
+        for item in "${TARGET_ARGS[@]}"; do
+            if [[ ! -e "$item" ]]; then
+                use_runtime_resolution=true
+                break
+            fi
+        done
     fi
 
     # 3. Resolve Target Applications
     declare -a APPS=()
 
-    if [[ -n "$runtime_apps_dir" ]]; then
-        if [[ ${#TARGET_ARGS[@]} -gt 0 ]]; then
-            for item in "${TARGET_ARGS[@]}"; do
-                local candidate="$runtime_apps_dir/$item"
-                [[ -d "$candidate" ]] || candidate="$runtime_apps_dir/${item}.app"
-                if [[ -d "$candidate" ]]; then
-                    APPS+=("$candidate")
-                else
-                    log_warn "App not found in runtime: $item"
+    if [[ "$use_runtime_resolution" == true ]]; then
+        if [[ -z "$OUTPUT_DIR" ]]; then
+            OUTPUT_DIR="${TMPDIR:-/tmp}/duo_patched_apps"
+            log_step "Staging patched apps in: $OUTPUT_DIR"
+        fi
+
+        log_info "Resolving application bundles (Target SDK: ${SDK_VER})..."
+        local app_entries
+        app_entries="$(simctl_query resolve_apps "$SDK_VER" "$FROM_RUNTIME" "${TARGET_ARGS[@]}")" || {
+            log_error "Failed to resolve application bundles."
+            exit 1
+        }
+
+        while IFS=$'\t' read -r app_path source_note; do
+            if [[ -n "$app_path" && -d "$app_path" ]]; then
+                APPS+=("$app_path")
+                if [[ -n "$source_note" ]]; then
+                    log_step "Resolved ${BOLD}${app_path:t}${RESET} from ${source_note}"
                 fi
-            done
-        else
-            # Default core stock apps if none specified
-            local defaults=("Contacts.app" "Preview.app" "Files.app" "Maps.app" "MobileCal.app" "Reminders.app" "Shortcuts.app" "Passwords.app" "News.app")
-            for d in "${defaults[@]}"; do
-                [[ -d "$runtime_apps_dir/$d" ]] && APPS+=("$runtime_apps_dir/$d")
-            done
-        fi
+            fi
+        done <<< "$app_entries"
     else
-        if [[ ${#TARGET_ARGS[@]} -eq 0 ]]; then
-            log_error "No target application bundles or directories specified."
-            usage
-        fi
         for item in "${TARGET_ARGS[@]}"; do
             local abs_item="${item:A}"
             if [[ -d "$abs_item" ]]; then
