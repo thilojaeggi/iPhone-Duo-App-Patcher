@@ -156,18 +156,29 @@ elif action == 'resolve_runtime':
     query = sys.argv[2].strip().lower()
     try:
         data = json.loads(subprocess.check_output(['xcrun', 'simctl', 'list', 'runtimes', '-j']))
+        def get_build(r):
+            root = r.get('runtimeRoot', '')
+            p = os.path.join(root, 'System/Library/CoreServices/SystemVersion.plist')
+            if os.path.exists(p):
+                try:
+                    return subprocess.check_output(['/usr/libexec/PlistBuddy', '-c', 'Print :ProductBuildVersion', p], stderr=subprocess.DEVNULL).decode().strip()
+                except: pass
+            return ''
+
         matches = []
         for r in data.get('runtimes', []):
             name = r.get('name', '').lower()
             ident = r.get('identifier', '').lower()
             root = r.get('runtimeRoot')
-            if not root:
+            if not root or not os.path.exists(root):
                 continue
             if query == name or query == ident or query == name.replace('ios ', ''):
-                matches.insert(0, r)
+                matches.append(r)
             elif query in name or query in ident:
                 matches.append(r)
+
         if matches:
+            matches.sort(key=lambda r: (1 if not get_build(r)[-1:].isalpha() else 0, get_build(r)), reverse=True)
             chosen = matches[0]
             print(chosen.get('runtimeRoot', ''))
             print(chosen.get('name', ''))
@@ -227,19 +238,31 @@ elif action == 'resolve_apps':
         data = json.loads(subprocess.check_output(['xcrun', 'simctl', 'list', 'runtimes', '-j']))
         runtimes = data.get('runtimes', [])
 
+        def get_build(r):
+            root = r.get('runtimeRoot', '')
+            p = os.path.join(root, 'System/Library/CoreServices/SystemVersion.plist')
+            if os.path.exists(p):
+                try:
+                    return subprocess.check_output(['/usr/libexec/PlistBuddy', '-c', 'Print :ProductBuildVersion', p], stderr=subprocess.DEVNULL).decode().strip()
+                except: pass
+            return ''
+
         def find_rt(query):
             if not query: return None
             q = query.lower().strip()
+            matches = []
             for r in runtimes:
                 name = r.get('name', '').lower()
                 ident = r.get('identifier', '').lower()
+                root = r.get('runtimeRoot')
+                if not root or not os.path.exists(root): continue
                 if q == name or q == ident or q == name.replace('ios ', ''):
-                    root = r.get('runtimeRoot')
-                    if root and os.path.exists(root): return r
-            for r in runtimes:
-                if q in r.get('name', '').lower() or q in r.get('identifier', '').lower():
-                    root = r.get('runtimeRoot')
-                    if root and os.path.exists(root): return r
+                    matches.append(r)
+                elif q in name or q in ident:
+                    matches.append(r)
+            if matches:
+                matches.sort(key=lambda r: (1 if not get_build(r)[-1:].isalpha() else 0, get_build(r)), reverse=True)
+                return matches[0]
             return None
 
         rt_27_2 = find_rt('27.2')
